@@ -1,0 +1,16 @@
+{
+  "name": "sinh-ton-2d-matchmaking-chat",
+  "version": "1.0.0",
+  "private": true,
+  "description": "WebSocket matchmaking and lobby/match chat server for Sinh Ton 2D Survivor",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "ws": "^8.18.3"
+  }
+}
