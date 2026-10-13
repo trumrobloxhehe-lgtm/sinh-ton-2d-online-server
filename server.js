@@ -53,10 +53,59 @@ function lobbyPacket(room) {
   };
 }
 function broadcastLobby(room) { broadcast(room, lobbyPacket(room)); }
+function clampNumber(value, min, max, fallback = 0) {
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.max(min, Math.min(max, n)) : fallback;
+}
+function cleanId(value) {
+  const id = String(value || '').slice(0, 40);
+  return /^[A-Za-z0-9_-]{1,40}$/.test(id) ? id : '';
+}
+function cleanWorldSnapshot(msg, room) {
+  const seenEnemies = new Set();
+  const enemies = (Array.isArray(msg.enemies) ? msg.enemies : []).slice(0, 70).map(e => {
+    if (!e || typeof e !== 'object') return null;
+    const id = cleanId(e.id);
+    const k = String(e.k || '').slice(0, 32);
+    if (!id || !/^[A-Z0-9_]+$/.test(k) || seenEnemies.has(id)) return null;
+    seenEnemies.add(id);
+    return {
+      id, k, b: e.b ? 1 : 0,
+      x: clampNumber(e.x, -100, 1100), y: clampNumber(e.y, -100, 800),
+      r: clampNumber(e.r, 4, 150, 12), h: clampNumber(e.h, 0, 100000),
+      m: clampNumber(e.m, 1, 100000, 1), d: clampNumber(e.d, 0, 10000),
+      e: clampNumber(e.e, 0, 10000), fa: clampNumber(e.fa, -1000, 1000),
+      ah: e.ah ? 1 : 0, hf: clampNumber(e.hf, 0, 30), sf: clampNumber(e.sf, 0, 30),
+      st: e.st ? 1 : 0, la: clampNumber(e.la, -1000, 1000),
+      so: clampNumber(e.so, -100000, 100000), at: clampNumber(e.at, 0, 100000000),
+      df: clampNumber(e.df, 0, 10000), h2: e.h2 ? 1 : 0
+    };
+  }).filter(Boolean);
+
+  const seenDrops = new Set();
+  const previousCollected = room.collectedDrops || new Set();
+  const drops = (Array.isArray(msg.drops) ? msg.drops : []).slice(0, 80).map(d => {
+    if (!d || typeof d !== 'object') return null;
+    const id = cleanId(d.id);
+    if (!id || seenDrops.has(id) || previousCollected.has(id)) return null;
+    if (d.t !== 'E' && d.t !== 'G') return null;
+    seenDrops.add(id);
+    return { id, x: clampNumber(d.x, -100, 1100), y: clampNumber(d.y, -100, 800), t: d.t, v: clampNumber(d.v, 0, 100000) };
+  }).filter(Boolean);
+
+  return {
+    stage: Math.floor(clampNumber(msg.stage, 1, 100, 1)),
+    wave: Math.floor(clampNumber(msg.wave, 1, 20, 1)),
+    gameState: msg.gameState === 'GAMEOVER' ? 'GAMEOVER' : 'PLAYING',
+    won: !!msg.won, enemies, drops
+  };
+}
 function makeRoom(mode, matchmaking = false) {
   const room = {
     code: makeCode(), mode, matchmaking, players: new Map(),
-    hostId: null, started: false, readyIds: new Set(), createdAt: Date.now()
+    hostId: null, started: false, readyIds: new Set(), createdAt: Date.now(),
+    world: { stage: 1, wave: 1, gameState: 'PLAYING', won: false, enemies: [], drops: [] },
+    collectedDrops: new Set()
   };
   rooms.set(room.code, room);
   return room;
@@ -111,6 +160,8 @@ function startMatch(room, stage = 1) {
   if (room.started) return;
   room.started = true;
   const safeStage = Math.max(1, Math.min(100, Math.floor(Number(stage) || 1)));
+  room.collectedDrops.clear();
+  room.world = { stage: safeStage, wave: 1, gameState: 'PLAYING', won: false, enemies: [], drops: [] };
   broadcast(room, {
     type: 'matchStart', mode: room.mode, stage: safeStage, roomCode: room.code,
     hostId: room.hostId, matchmaking: room.matchmaking, players: playerList(room)
@@ -259,6 +310,64 @@ wss.on('connection', ws => {
       const hp = Number(state.hp);
       if (Number.isFinite(hp)) player.hp = Math.max(0, Math.min(player.maxHp, hp));
       broadcast(room, { type: 'playerState', player: publicPlayer(player) }, ws);
+      return;
+    }
+    if (msg.type === 'worldSnapshot') {
+      if (room.mode !== 'coop' || !room.started || room.hostId !== player.id) return;
+      const now = Date.now();
+      if (now - (player.lastWorldAt || 0) < 90) return;
+      player.lastWorldAt = now;
+      room.world = cleanWorldSnapshot(msg, room);
+      broadcast(room, { type: 'worldSnapshot', ...room.world }, ws);
+      return;
+    }
+    if (msg.type === 'enemyDamage') {
+      if (room.mode !== 'coop' || !room.started || room.hostId === player.id) return;
+      const enemyId = cleanId(msg.enemyId);
+      if (!enemyId || !room.world.enemies.some(e => e.id === enemyId)) return;
+      const now = Date.now();
+      if (!player.enemyDamageWindow || now - player.enemyDamageWindow >= 1000) {
+        player.enemyDamageWindow = now;
+        player.enemyDamageCount = 0;
+      }
+      player.enemyDamageCount = (player.enemyDamageCount || 0) + 1;
+      if (player.enemyDamageCount > 30) return;
+      const amount = clampNumber(msg.amount, 0, 100);
+      if (amount <= 0) return;
+      const host = room.players.get(room.hostId);
+      if (host) send(host.socket, {
+        type: 'enemyDamageRequest', enemyId, amount,
+        angle: Number.isFinite(Number(msg.angle)) ? clampNumber(msg.angle, -1000, 1000) : null,
+        ignoreArmor: !!msg.ignoreArmor, attackerId: player.id
+      });
+      return;
+    }
+    if (msg.type === 'coopPlayerDamage') {
+      if (room.mode !== 'coop' || !room.started || room.hostId !== player.id) return;
+      const target = room.players.get(String(msg.targetId || ''));
+      if (!target || target.id === player.id) return;
+      const amount = clampNumber(msg.amount, 0, 999);
+      if (amount <= 0) return;
+      send(target.socket, { type: 'playerDamage', amount });
+      return;
+    }
+    if (msg.type === 'coopPickup') {
+      if (room.mode !== 'coop' || !room.started) return;
+      const dropId = cleanId(msg.dropId);
+      const drop = dropId ? room.world.drops.find(d => d.id === dropId) : null;
+      if (!drop || room.collectedDrops.has(dropId)) {
+        send(ws, { type: 'coopPickupDenied', dropId });
+        return;
+      }
+      // Position values are server-maintained from the player's recent state packets.
+      if (Math.hypot(player.x - drop.x, player.y - drop.y) > 130) {
+        send(ws, { type: 'coopPickupDenied', dropId });
+        return;
+      }
+      room.collectedDrops.add(dropId);
+      room.world.drops = room.world.drops.filter(d => d.id !== dropId);
+      broadcast(room, { type: 'dropRemoved', dropId });
+      send(ws, { type: 'xpAward', drop: { type: drop.t === 'E' ? 'EXP' : 'GOLD', value: drop.v } });
       return;
     }
     if (msg.type === 'pvpAttack') {
