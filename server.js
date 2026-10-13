@@ -204,7 +204,7 @@ const httpServer = http.createServer((req, res) => {
   res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
   res.end('Not found');
 });
-const wss = new WebSocketServer({ noServer: true, maxPayload: 16 * 1024 });
+const wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
 httpServer.on('upgrade', (req, socket, head) => {
   const path = new URL(req.url, 'http://' + (req.headers.host || 'localhost')).pathname;
   if (path !== '/ws') {
