@@ -19,9 +19,14 @@ const qaEvents = [];
 const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL || '';
 const DISCORD_NOTIFY_COOLDOWN_MS = 60_000;
 let lastDiscordNotifyAt = 0;
+let discordApiTemporarilyBlocked = false;
 function postDiscordContent(content, attempt = 0) {
   if (!DISCORD_WEBHOOK_URL) {
     console.error('Discord notification skipped: DISCORD_WEBHOOK_URL is not configured');
+    return;
+  }
+  if (discordApiTemporarilyBlocked) {
+    console.warn('Discord notifications paused because Discord temporarily blocked this server from its API');
     return;
   }
   let webhook;
@@ -55,18 +60,25 @@ function postDiscordContent(content, attempt = 0) {
         return;
       }
       const responseBody = Buffer.concat(chunks).toString('utf8');
+      let payload = null;
+      try { payload = JSON.parse(responseBody); } catch (_) {}
+      if (res.statusCode === 429 && Number(payload && payload.code) === 0 &&
+          /blocked from accessing our API temporarily/i.test(String(payload && payload.message || ''))) {
+        discordApiTemporarilyBlocked = true;
+        console.error('Discord has temporarily blocked this server from the API; pausing notifications and not retrying automatically');
+        return;
+      }
       if (res.statusCode === 429 && attempt < 2) {
         let retryAfter = Number(res.headers['retry-after']);
-        try {
-          const payload = JSON.parse(responseBody);
-          if (Number.isFinite(Number(payload.retry_after))) retryAfter = Number(payload.retry_after);
-        } catch (_) {}
-        const delayMs = Number.isFinite(retryAfter)
-          ? Math.max(1000, Math.min(30000, retryAfter * 1000 + 250))
-          : 2500;
-        console.warn('Discord webhook rate limited; retrying after ' + delayMs + 'ms');
-        setTimeout(() => postDiscordContent(content, attempt + 1), delayMs);
-        return;
+        if (Number.isFinite(Number(payload && payload.retry_after))) {
+          retryAfter = Number(payload.retry_after);
+        }
+        if (Number.isFinite(retryAfter) && retryAfter > 0) {
+          const delayMs = Math.min(2147000000, Math.ceil(retryAfter * 1000 + 250));
+          console.warn('Discord webhook rate limited; retrying after Retry-After (' + Math.ceil(delayMs / 1000) + 's)');
+          setTimeout(() => postDiscordContent(content, attempt + 1), delayMs);
+          return;
+        }
       }
       console.error('Discord webhook returned HTTP ' + res.statusCode +
         (responseBody ? '; response: ' + responseBody.slice(0, 300) : ''));
@@ -78,7 +90,7 @@ function postDiscordContent(content, attempt = 0) {
   req.end();
 }
 function notifyDiscordMatchmaking(mode) {
-  if (!DISCORD_WEBHOOK_URL) return;
+  if (!DISCORD_WEBHOOK_URL || discordApiTemporarilyBlocked) return;
   const now = Date.now();
   if (now - lastDiscordNotifyAt < DISCORD_NOTIFY_COOLDOWN_MS) return;
   lastDiscordNotifyAt = now;
