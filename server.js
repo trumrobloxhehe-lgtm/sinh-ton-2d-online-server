@@ -10,6 +10,82 @@ const COLORS = ['#3b82f6', '#c084fc', '#34d399', '#fb923c'];
 const ROOM_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const rooms = new Map();
 const queues = { coop: [], pvp: [] };
+const qaRateByAddress = new Map();
+let qaGlobalWindowStart = Date.now();
+let qaGlobalCount = 0;
+const QA_EVENTS = new Set([
+  'client_loaded', 'gameplay_start', 'gameplay_end', 'js_error', 'promise_rejection',
+  'fps_sample', 'online_ws_open', 'online_ws_error', 'online_ws_close',
+  'online_event_batch', 'page_visibility'
+]);
+function qaNumber(value, min, max) {
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.max(min, Math.min(max, n)) : null;
+}
+function qaText(value, max = 180) {
+  return String(value == null ? '' : value).replace(/[\\u0000-\\u001f\\u007f]/g, ' ').replace(/\\s+/g, ' ').trim().slice(0, max);
+}
+function qaCleanPayload(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return null;
+  const event = String(input.event || '');
+  if (!QA_EVENTS.has(event)) return null;
+  const out = {
+    event,
+    session: /^[a-f0-9-]{16,40}$/i.test(String(input.session || '')) ? String(input.session).slice(0, 40) : undefined,
+    atClient: qaText(input.at, 32) || undefined,
+    build: /^[a-z0-9._-]{1,32}$/i.test(String(input.build || '')) ? String(input.build) : undefined
+  };
+  const enums = {
+    mode: new Set(['solo', 'coop', 'pvp', 'unknown']),
+    source: new Set(['window_error', 'unhandled_rejection']),
+    errorKind: new Set(['network', 'parse', 'runtime', 'unknown'])
+  };
+  for (const k of ['mode', 'source', 'errorKind']) {
+    const v = String(input[k] || '');
+    if (enums[k].has(v)) out[k] = v;
+  }
+  for (const [k, range] of Object.entries({
+    fps: [0, 240], minFps: [0, 240], frameMs: [0, 2000], stage: [1, 100],
+    wave: [1, 20], enemyCount: [0, 500], bulletCount: [0, 3000],
+    durationSec: [0, 86400], closeCode: [0, 65535], snapshotsRx: [0, 100000],
+    projectilesRx: [0, 100000], projectilesTx: [0, 100000],
+    stateRx: [0, 100000], errorsRx: [0, 10000], packetCount: [0, 100000]
+  })) {
+    const n = qaNumber(input[k], range[0], range[1]);
+    if (n !== null) out[k] = Math.round(n * 100) / 100;
+  }
+  if (typeof input.wasClean === 'boolean') out.wasClean = input.wasClean;
+  if (typeof input.visible === 'boolean') out.visible = input.visible;
+  if (input.message) out.message = qaText(input.message, 180);
+  if (input.line != null) out.line = Math.round(qaNumber(input.line, 0, 100000) || 0);
+  return out;
+}
+function qaTelemetryAllowed(req) {
+  const now = Date.now();
+  if (now - qaGlobalWindowStart >= 60000) { qaGlobalWindowStart = now; qaGlobalCount = 0; }
+  if (qaGlobalCount >= 1200) return false;
+  qaGlobalCount++;
+  const address = String(req.socket.remoteAddress || 'unknown').slice(0, 80);
+  let entry = qaRateByAddress.get(address);
+  if (!entry || now - entry.start >= 60000) entry = { start: now, count: 0 };
+  entry.count++;
+  qaRateByAddress.set(address, entry);
+  if (qaRateByAddress.size > 5000) {
+    for (const [key, value] of qaRateByAddress) if (now - value.start > 60000) qaRateByAddress.delete(key);
+    while (qaRateByAddress.size > 5000) qaRateByAddress.delete(qaRateByAddress.keys().next().value);
+  }
+  return entry.count <= 12;
+}
+function qaCorsHeaders() {
+  return {
+    'access-control-allow-origin': '*',
+    'access-control-allow-methods': 'POST, OPTIONS',
+    'access-control-allow-headers': 'content-type',
+    'access-control-max-age': '86400',
+    'cache-control': 'no-store'
+  };
+}
+
 
 function send(ws, packet) {
   if (ws && ws.readyState === WebSocket.OPEN) {
@@ -193,6 +269,51 @@ function tryPairQueue(mode) {
 
 const httpServer = http.createServer((req, res) => {
   const path = new URL(req.url, 'http://' + (req.headers.host || 'localhost')).pathname;
+  if (path === '/qa/telemetry') {
+    const headers = qaCorsHeaders();
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204, headers);
+      res.end();
+      return;
+    }
+    if (req.method !== 'POST') {
+      res.writeHead(405, { ...headers, 'content-type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ ok: false, error: 'POST required' }));
+      return;
+    }
+    if (!qaTelemetryAllowed(req)) {
+      res.writeHead(429, { ...headers, 'content-type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ ok: false, error: 'Rate limited' }));
+      return;
+    }
+    let body = '';
+    let tooLarge = false;
+    req.on('data', chunk => {
+      body += chunk.toString('utf8');
+      if (body.length > 8192) { tooLarge = true; req.destroy(); }
+    });
+    req.on('end', () => {
+      if (tooLarge) return;
+      let incoming;
+      try { incoming = JSON.parse(body); } catch (_) {
+        res.writeHead(400, { ...headers, 'content-type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ ok: false, error: 'Invalid JSON' }));
+        return;
+      }
+      const event = qaCleanPayload(incoming);
+      if (!event) {
+        res.writeHead(400, { ...headers, 'content-type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ ok: false, error: 'Unsupported telemetry event' }));
+        return;
+      }
+      // Log only anonymized diagnostics. Never store IP, player name, chat, room code, or persistent ID.
+      console.log('QA_EVENT ' + JSON.stringify({ at: new Date().toISOString(), ...event }));
+      res.writeHead(204, headers);
+      res.end();
+    });
+    req.on('error', () => {});
+    return;
+  }
   if (path === '/health') {
     res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
     res.end(JSON.stringify({ ok: true, service: 'sinh-ton-2d-online', rooms: rooms.size, waiting: { coop: queues.coop.length, pvp: queues.pvp.length }, uptimeSeconds: Math.floor(process.uptime()) }));
