@@ -203,6 +203,29 @@ function lobbyPacket(room) {
   };
 }
 function broadcastLobby(room) { broadcast(room, lobbyPacket(room)); }
+function getSkillPickers(room) {
+  return [...room.skillPickers.values()].map(entry => ({
+    playerId: entry.playerId, slot: entry.slot, deadlineAt: entry.deadlineAt
+  }));
+}
+function broadcastSkillPauseState(room, playerId, active, timedOut = false) {
+  const p = room.players.get(playerId);
+  broadcast(room, {
+    type: 'coopSkillPause',
+    active: !!active,
+    playerId,
+    slot: p ? p.slot : (room.skillPickers.get(playerId)?.slot || 0),
+    deadlineAt: room.skillPickers.get(playerId)?.deadlineAt || Date.now(),
+    timedOut: !!timedOut,
+    activePickers: getSkillPickers(room)
+  });
+}
+function endSkillPick(room, playerId, timedOut = false) {
+  const entry = room.skillPickers.get(playerId);
+  if (entry && entry.timer) clearTimeout(entry.timer);
+  room.skillPickers.delete(playerId);
+  broadcastSkillPauseState(room, playerId, false, timedOut);
+}
 function clampNumber(value, min, max, fallback = 0) {
   const n = Number(value);
   return Number.isFinite(n) ? Math.max(min, Math.min(max, n)) : fallback;
@@ -255,7 +278,7 @@ function makeRoom(mode, matchmaking = false) {
     code: makeCode(), mode, matchmaking, players: new Map(),
     hostId: null, started: false, readyIds: new Set(), createdAt: Date.now(),
     world: { stage: 1, wave: 1, gameState: 'PLAYING', won: false, enemies: [], drops: [] },
-    collectedDrops: new Set()
+    collectedDrops: new Set(), skillPickers: new Map()
   };
   rooms.set(room.code, room);
   return room;
@@ -295,6 +318,7 @@ function closePlayer(ws) {
   const { room, player } = ws.playerRef;
   room.players.delete(player.id);
   room.readyIds.delete(player.id);
+  if (room.skillPickers.has(player.id)) endSkillPick(room, player.id, true);
   ws.playerRef = null;
   if (room.players.size === 0) {
     rooms.delete(room.code);
@@ -313,6 +337,8 @@ function startMatch(room, stage = 1) {
   const requestedStage = Math.floor(Number(stage) || Number(room.players.get(room.hostId)?.selectedStage) || 1);
   const safeStage = Math.max(1, Math.min(100, requestedStage, lowestUnlocked));
   room.collectedDrops.clear();
+  for (const entry of room.skillPickers.values()) if (entry.timer) clearTimeout(entry.timer);
+  room.skillPickers.clear();
   room.world = { stage: safeStage, wave: 1, gameState: 'PLAYING', won: false, enemies: [], drops: [] };
   broadcast(room, {
     type: 'matchStart', mode: room.mode, stage: safeStage, roomCode: room.code,
@@ -555,6 +581,24 @@ wss.on('connection', ws => {
         player.projectileCount++;
       }
       if (projectiles.length) broadcast(room, { type: 'projectiles', playerId: player.id, projectiles }, ws);
+      return;
+    }
+    if (msg.type === 'coopSkillPause') {
+      if (room.mode !== 'coop' || !room.started) return;
+      if (msg.active === true) {
+        const existing = room.skillPickers.get(player.id);
+        if (existing && existing.timer) clearTimeout(existing.timer);
+        const entry = { playerId: player.id, slot: player.slot, deadlineAt: Date.now() + 4000, timer: null };
+        entry.timer = setTimeout(() => {
+          if (room.skillPickers.get(player.id) !== entry) return;
+          room.skillPickers.delete(player.id);
+          broadcastSkillPauseState(room, player.id, false, true);
+        }, 4500);
+        room.skillPickers.set(player.id, entry);
+        broadcastSkillPauseState(room, player.id, true, false);
+      } else {
+        endSkillPick(room, player.id, false);
+      }
       return;
     }
     if (msg.type === 'worldSnapshot') {
