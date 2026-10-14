@@ -32,7 +32,7 @@ function makeCode() {
   return code;
 }
 function publicPlayer(p) {
-  return { id: p.id, name: p.name, slot: p.slot, color: p.color, x: p.x, y: p.y, hp: p.hp, maxHp: p.maxHp, level: p.level };
+  return { id: p.id, name: p.name, slot: p.slot, color: p.color, x: p.x, y: p.y, hp: p.hp, maxHp: p.maxHp, level: p.level, unlockedStage: p.unlockedStage, selectedStage: p.selectedStage };
 }
 function playerList(room) {
   return [...room.players.values()].map(publicPlayer).sort((a, b) => a.slot - b.slot);
@@ -114,7 +114,7 @@ function addPlayer(room, ws, name, slot) {
   const p = {
     id: randomUUID().slice(0, 8), socket: ws, name: safeName(name), slot,
     color: COLORS[slot - 1], x: 500, y: 350, hp: 100, maxHp: 100, level: 1,
-    lastChatAt: 0, lastStateAt: 0, lastAttackAt: 0
+    unlockedStage: 1, selectedStage: 1, lastChatAt: 0, lastStateAt: 0, lastAttackAt: 0
   };
   room.players.set(p.id, p);
   if (!room.hostId) room.hostId = p.id;
@@ -159,7 +159,9 @@ function closePlayer(ws) {
 function startMatch(room, stage = 1) {
   if (room.started) return;
   room.started = true;
-  const safeStage = Math.max(1, Math.min(100, Math.floor(Number(stage) || 1)));
+  const lowestUnlocked = room.players.size ? Math.min(...[...room.players.values()].map(p => Math.max(1, Math.min(100, Math.floor(Number(p.unlockedStage) || 1))))) : 1;
+  const requestedStage = Math.floor(Number(stage) || Number(room.players.get(room.hostId)?.selectedStage) || 1);
+  const safeStage = Math.max(1, Math.min(100, requestedStage, lowestUnlocked));
   room.collectedDrops.clear();
   room.world = { stage: safeStage, wave: 1, gameState: 'PLAYING', won: false, enemies: [], drops: [] };
   broadcast(room, {
@@ -286,13 +288,24 @@ wss.on('connection', ws => {
       if (msg.ready === false) room.readyIds.delete(player.id);
       else room.readyIds.add(player.id);
       broadcastLobby(room);
-      if (room.players.size >= 2 && [...room.players.keys()].every(id => room.readyIds.has(id))) startMatch(room, 1);
+      if (room.players.size >= 2 && [...room.players.keys()].every(id => room.readyIds.has(id))) { const host = room.players.get(room.hostId); startMatch(room, host ? host.selectedStage : 1); }
       return;
     }
     if (msg.type === 'start') {
       if (room.matchmaking) { fail(ws, 'Both random-match players should press Ready.'); return; }
       if (room.hostId !== player.id) { fail(ws, 'Only the host can start the match.'); return; }
       startMatch(room, msg.stage);
+      return;
+    }
+    if (msg.type === 'progress') {
+      player.unlockedStage = Math.floor(clampNumber(msg.unlockedStage, 1, 100, player.unlockedStage || 1));
+      player.selectedStage = Math.floor(clampNumber(msg.selectedStage, 1, player.unlockedStage, player.selectedStage || 1));
+      // The teammate with more unlocked stages is the stage leader before a match starts.
+      if (!room.started) {
+        const leader = [...room.players.values()].sort((a, b) => b.unlockedStage - a.unlockedStage || a.slot - b.slot)[0];
+        if (leader) room.hostId = leader.id;
+        broadcastLobby(room);
+      }
       return;
     }
     if (msg.type === 'state') {
