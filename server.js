@@ -19,38 +19,72 @@ const qaEvents = [];
 const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL || '';
 const DISCORD_NOTIFY_COOLDOWN_MS = 60_000;
 let lastDiscordNotifyAt = 0;
-function notifyDiscordMatchmaking(mode) {
-  if (!DISCORD_WEBHOOK_URL) return;
-  const now = Date.now();
-  if (now - lastDiscordNotifyAt < DISCORD_NOTIFY_COOLDOWN_MS) return;
+function postDiscordContent(content, attempt = 0) {
+  if (!DISCORD_WEBHOOK_URL) {
+    console.error('Discord notification skipped: DISCORD_WEBHOOK_URL is not configured');
+    return;
+  }
   let webhook;
   try {
     webhook = new URL(DISCORD_WEBHOOK_URL);
     if (webhook.protocol !== 'https:' ||
         !['discord.com', 'discordapp.com', 'canary.discord.com', 'ptb.discord.com'].includes(webhook.hostname) ||
-        !webhook.pathname.startsWith('/api/webhooks/')) return;
-  } catch (_) { return; }
-  lastDiscordNotifyAt = now;
-  const time = new Date(now).toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' });
-  const body = JSON.stringify({
-    content: '🔎 Sinh Tồn 2D: Có người đang tìm đồng đội ' +
-      (mode === 'pvp' ? 'PvP' : 'CO-OP') + ' lúc ' + time + ' (giờ Việt Nam).',
-    allowed_mentions: { parse: [] }
-  });
+        !webhook.pathname.startsWith('/api/webhooks/')) {
+      console.error('Discord notification skipped: webhook URL format is invalid');
+      return;
+    }
+  } catch (_) {
+    console.error('Discord notification skipped: webhook URL format is invalid');
+    return;
+  }
+  const body = JSON.stringify({ content, allowed_mentions: { parse: [] } });
   const req = https.request(webhook, {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) },
-    timeout: 5000
+    timeout: 8000
   }, res => {
-    res.resume();
-    if (res.statusCode < 200 || res.statusCode >= 300) {
-      console.error('Discord webhook returned HTTP ' + res.statusCode);
-    }
+    const chunks = [];
+    let responseSize = 0;
+    res.on('data', chunk => {
+      responseSize += chunk.length;
+      if (responseSize <= 4096) chunks.push(chunk);
+    });
+    res.on('end', () => {
+      if (res.statusCode >= 200 && res.statusCode < 300) {
+        console.log('Discord notification delivered');
+        return;
+      }
+      const responseBody = Buffer.concat(chunks).toString('utf8');
+      if (res.statusCode === 429 && attempt < 2) {
+        let retryAfter = Number(res.headers['retry-after']);
+        try {
+          const payload = JSON.parse(responseBody);
+          if (Number.isFinite(Number(payload.retry_after))) retryAfter = Number(payload.retry_after);
+        } catch (_) {}
+        const delayMs = Number.isFinite(retryAfter)
+          ? Math.max(1000, Math.min(30000, retryAfter * 1000 + 250))
+          : 2500;
+        console.warn('Discord webhook rate limited; retrying after ' + delayMs + 'ms');
+        setTimeout(() => postDiscordContent(content, attempt + 1), delayMs);
+        return;
+      }
+      console.error('Discord webhook returned HTTP ' + res.statusCode +
+        (responseBody ? '; response: ' + responseBody.slice(0, 300) : ''));
+    });
   });
   req.on('timeout', () => req.destroy(new Error('Discord webhook timeout')));
   req.on('error', err => console.error('Discord notification failed: ' + (err.message || 'request error')));
   req.write(body);
   req.end();
+}
+function notifyDiscordMatchmaking(mode) {
+  if (!DISCORD_WEBHOOK_URL) return;
+  const now = Date.now();
+  if (now - lastDiscordNotifyAt < DISCORD_NOTIFY_COOLDOWN_MS) return;
+  lastDiscordNotifyAt = now;
+  const time = new Date(now).toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' });
+  postDiscordContent('🔎 Sinh Tồn 2D: Có người đang tìm đồng đội ' +
+    (mode === 'pvp' ? 'PvP' : 'CO-OP') + ' lúc ' + time + ' (giờ Việt Nam).');
 }
 function qaRecord(event) {
   const stored = { at: Date.now(), ...event };
@@ -725,4 +759,9 @@ const heartbeat = setInterval(() => {
   }
 }, 30000);
 httpServer.on('close', () => clearInterval(heartbeat));
-httpServer.listen(PORT, '0.0.0.0', () => console.log('Sinh Ton 2D matchmaking/chat server listening on port ' + PORT));
+httpServer.listen(PORT, '0.0.0.0', () => {
+  console.log('Sinh Ton 2D matchmaking/chat server listening on port ' + PORT);
+  if (process.env.DISCORD_TEST_ON_START === 'true') {
+    postDiscordContent('🧪 Kiểm tra Discord: kết nối với server Sinh Tồn 2D đang hoạt động.');
+  }
+});
