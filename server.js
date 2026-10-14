@@ -325,6 +325,32 @@ wss.on('connection', ws => {
       broadcast(room, { type: 'playerState', player: publicPlayer(player) }, ws);
       return;
     }
+    if (msg.type === 'projectiles') {
+      if (!room.started || !Array.isArray(msg.projectiles)) return;
+      const now = Date.now();
+      if (!player.projectileWindow || now - player.projectileWindow >= 1000) {
+        player.projectileWindow = now;
+        player.projectileCount = 0;
+      }
+      const projectiles = [];
+      for (const shot of msg.projectiles.slice(0, 32)) {
+        if (!shot || typeof shot !== 'object' || player.projectileCount >= 140) break;
+        const kind = shot.kind === 'sword' ? 'sword' : 'bullet';
+        const x = Number(shot.x), y = Number(shot.y), vx = Number(shot.vx), vy = Number(shot.vy);
+        if (![x, y, vx, vy].every(Number.isFinite)) continue;
+        if (Math.abs(vx) > 12 || Math.abs(vy) > 12) continue;
+        const color = typeof shot.color === 'string' && /^#[0-9a-fA-F]{6}$/.test(shot.color)
+          ? shot.color : player.color;
+        projectiles.push({
+          x: clampNumber(x, -100, 1100), y: clampNumber(y, -100, 800),
+          vx, vy, kind, color,
+          radius: clampNumber(shot.radius, 2, 14, kind === 'sword' ? 13 : 3)
+        });
+        player.projectileCount++;
+      }
+      if (projectiles.length) broadcast(room, { type: 'projectiles', playerId: player.id, projectiles }, ws);
+      return;
+    }
     if (msg.type === 'worldSnapshot') {
       if (room.mode !== 'coop' || !room.started || room.hostId !== player.id) return;
       const now = Date.now();
