@@ -11,6 +11,63 @@ const ROOM_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const rooms = new Map();
 const queues = { coop: [], pvp: [] };
 const qaRateByAddress = new Map();
+const QA_WINDOW_MS = 72 * 60 * 60 * 1000;
+const QA_BUFFER_MAX = 3000;
+const qaBootAt = Date.now();
+const qaEvents = [];
+function qaRecord(event) {
+  const stored = { at: Date.now(), ...event };
+  qaEvents.push(stored);
+  if (qaEvents.length > QA_BUFFER_MAX) qaEvents.splice(0, qaEvents.length - QA_BUFFER_MAX);
+}
+function makeQaReport(windowHours = 72) {
+  const hours = Math.max(1, Math.min(72, Number(windowHours) || 72));
+  const cutoff = Date.now() - hours * 60 * 60 * 1000;
+  const events = qaEvents.filter(e => e.at >= cutoff);
+  const counts = {};
+  const sessions = new Set();
+  const errorMap = new Map();
+  let fpsSum = 0, fpsSamples = 0, lowFps = 0, minFps = null, worstFrameMs = null;
+  for (const e of events) {
+    counts[e.event] = (counts[e.event] || 0) + 1;
+    if (e.session) sessions.add(e.session);
+    if (e.event === 'fps_sample' && Number.isFinite(e.fps)) {
+      fpsSum += e.fps;
+      fpsSamples++;
+      minFps = minFps === null ? (e.minFps ?? e.fps) : Math.min(minFps, e.minFps ?? e.fps);
+      worstFrameMs = worstFrameMs === null ? (e.frameMs ?? null) : Math.max(worstFrameMs, e.frameMs ?? 0);
+      if (e.fps < 50 || (e.minFps ?? e.fps) < 35) lowFps++;
+    }
+    if (e.event === 'js_error' || e.event === 'promise_rejection' || e.event === 'online_ws_error') {
+      const msg = qaText(e.message || e.event, 120) || e.event;
+      errorMap.set(msg, (errorMap.get(msg) || 0) + 1);
+    }
+  }
+  const topErrors = [...errorMap.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 8)
+    .map(([message, count]) => ({ message, count }));
+  return {
+    generatedAt: new Date().toISOString(),
+    windowHours: hours,
+    windowStart: new Date(cutoff).toISOString(),
+    serverStartedAt: new Date(qaBootAt).toISOString(),
+    telemetryEventsObserved: events.length,
+    telemetryBufferCapacity: QA_BUFFER_MAX,
+    uniquePageSessionsObserved: sessions.size,
+    eventCounts: counts,
+    performance: {
+      fpsSamples,
+      averageFps: fpsSamples ? Math.round(fpsSum / fpsSamples * 10) / 10 : null,
+      lowestReportedFps: minFps === null ? null : Math.round(minFps * 10) / 10,
+      lowFpsSamples: lowFps,
+      worstReportedFrameMs: worstFrameMs === null ? null : Math.round(worstFrameMs * 10) / 10
+    },
+    topErrors,
+    limitations: 'In-memory aggregate resets on server restart or sleep; it is not a complete historical audit. Only clients using the instrumented game build are counted.'
+  };
+}
+
 let qaGlobalWindowStart = Date.now();
 let qaGlobalCount = 0;
 const QA_EVENTS = new Set([
@@ -23,7 +80,11 @@ function qaNumber(value, min, max) {
   return Number.isFinite(n) ? Math.max(min, Math.min(max, n)) : null;
 }
 function qaText(value, max = 180) {
-  return String(value == null ? '' : value).replace(/[\\u0000-\\u001f\\u007f]/g, ' ').replace(/\\s+/g, ' ').trim().slice(0, max);
+  return String(value == null ? '' : value)
+    .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .replace(/https?:\/\/\S+/gi, '[url]')
+    .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '[email]')
+    .replace(/\s+/g, ' ').trim().slice(0, max);
 }
 function qaCleanPayload(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return null;
@@ -269,6 +330,15 @@ function tryPairQueue(mode) {
 
 const httpServer = http.createServer((req, res) => {
   const path = new URL(req.url, 'http://' + (req.headers.host || 'localhost')).pathname;
+  if (path === '/qa/report') {
+    const headers = { ...qaCorsHeaders(), 'access-control-allow-methods': 'GET, OPTIONS', 'content-type': 'application/json; charset=utf-8' };
+    if (req.method === 'OPTIONS') { res.writeHead(204, headers); res.end(); return; }
+    if (req.method !== 'GET') { res.writeHead(405, headers); res.end(JSON.stringify({ ok: false, error: 'GET required' })); return; }
+    const requestedHours = Number(new URL(req.url, 'http://' + (req.headers.host || 'localhost')).searchParams.get('windowHours') || 72);
+    res.writeHead(200, headers);
+    res.end(JSON.stringify(makeQaReport(requestedHours)));
+    return;
+  }
   if (path === '/qa/telemetry') {
     const headers = qaCorsHeaders();
     if (req.method === 'OPTIONS') {
@@ -306,8 +376,10 @@ const httpServer = http.createServer((req, res) => {
         res.end(JSON.stringify({ ok: false, error: 'Unsupported telemetry event' }));
         return;
       }
-      // Log only anonymized diagnostics. Never store IP, player name, chat, room code, or persistent ID.
-      console.log('QA_EVENT ' + JSON.stringify({ at: new Date().toISOString(), ...event }));
+      // Address is used only in a short-lived rate-limit map. Never log IP, player name, chat, or room code.
+      qaRecord(event);
+      const { session: _session, ...logEvent } = event;
+      console.log('QA_EVENT ' + JSON.stringify({ at: new Date().toISOString(), ...logEvent }));
       res.writeHead(204, headers);
       res.end();
     });
