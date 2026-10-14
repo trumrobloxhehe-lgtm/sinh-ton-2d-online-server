@@ -6,6 +6,8 @@ const { WebSocket, WebSocketServer } = require('ws');
 
 const PORT = Number(process.env.PORT || 3000);
 const MAX_ROOM_PLAYERS = 4;
+const WORLD_WIDTH = 2000;
+const WORLD_HEIGHT = 1400;
 const MAX_CHAT_LENGTH = 180;
 const COLORS = ['#3b82f6', '#c084fc', '#34d399', '#fb923c'];
 const ROOM_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -327,7 +329,7 @@ function cleanWorldSnapshot(msg, room) {
     seenEnemies.add(id);
     return {
       id, k, b: e.b ? 1 : 0,
-      x: clampNumber(e.x, -100, 1100), y: clampNumber(e.y, -100, 800),
+      x: clampNumber(e.x, -100, WORLD_WIDTH + 100), y: clampNumber(e.y, -100, WORLD_HEIGHT + 100),
       r: clampNumber(e.r, 4, 150, 12), h: clampNumber(e.h, 0, 100000),
       m: clampNumber(e.m, 1, 100000, 1), d: clampNumber(e.d, 0, 10000),
       e: clampNumber(e.e, 0, 10000), fa: clampNumber(e.fa, -1000, 1000),
@@ -346,7 +348,7 @@ function cleanWorldSnapshot(msg, room) {
     if (!id || seenDrops.has(id) || previousCollected.has(id)) return null;
     if (d.t !== 'E' && d.t !== 'G') return null;
     seenDrops.add(id);
-    return { id, x: clampNumber(d.x, -100, 1100), y: clampNumber(d.y, -100, 800), t: d.t, v: clampNumber(d.v, 0, 100000) };
+    return { id, x: clampNumber(d.x, -100, WORLD_WIDTH + 100), y: clampNumber(d.y, -100, WORLD_HEIGHT + 100), t: d.t, v: clampNumber(d.v, 0, 100000) };
   }).filter(Boolean);
 
   return {
@@ -369,7 +371,7 @@ function makeRoom(mode, matchmaking = false) {
 function addPlayer(room, ws, name, slot) {
   const p = {
     id: randomUUID().slice(0, 8), socket: ws, name: safeName(name), slot,
-    color: COLORS[slot - 1], x: 500, y: 350, hp: 100, maxHp: 100, level: 1,
+    color: COLORS[slot - 1], x: WORLD_WIDTH / 2, y: WORLD_HEIGHT / 2, hp: 100, maxHp: 100, level: 1,
     unlockedStage: 1, selectedStage: 1, lastChatAt: 0, lastStateAt: 0, lastAttackAt: 0
   };
   room.players.set(p.id, p);
@@ -630,8 +632,8 @@ wss.on('connection', ws => {
       player.lastStateAt = now;
       const state = msg.state || {};
       const x = Number(state.x), y = Number(state.y);
-      if (Number.isFinite(x)) player.x = Math.max(16, Math.min(984, x));
-      if (Number.isFinite(y)) player.y = Math.max(16, Math.min(684, y));
+      if (Number.isFinite(x)) player.x = Math.max(16, Math.min(WORLD_WIDTH - 16, x));
+      if (Number.isFinite(y)) player.y = Math.max(16, Math.min(WORLD_HEIGHT - 16, y));
       const maxHp = Number(state.maxHp);
       if (Number.isFinite(maxHp)) player.maxHp = Math.max(1, Math.min(10000, maxHp));
       const level = Number(state.level);
@@ -658,7 +660,7 @@ wss.on('connection', ws => {
         const color = typeof shot.color === 'string' && /^#[0-9a-fA-F]{6}$/.test(shot.color)
           ? shot.color : player.color;
         projectiles.push({
-          x: clampNumber(x, -100, 1100), y: clampNumber(y, -100, 800),
+          x: clampNumber(x, -100, WORLD_WIDTH + 100), y: clampNumber(y, -100, WORLD_HEIGHT + 100),
           vx, vy, kind, color,
           radius: clampNumber(shot.radius, 2, 14, kind === 'sword' ? 13 : 3)
         });
