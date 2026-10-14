@@ -28,9 +28,21 @@ function makeQaReport(windowHours = 72) {
   const sessions = new Set();
   const errorMap = new Map();
   let fpsSum = 0, fpsSamples = 0, lowFps = 0, minFps = null, worstFrameMs = null;
+  const network = { packets: 0, projectilesSent: 0, projectilesReceived: 0, worldSnapshotsReceived: 0, playerStatesReceived: 0, serverErrorsReceived: 0, websocketOpens: 0, websocketErrors: 0, websocketCloses: 0 };
   for (const e of events) {
     counts[e.event] = (counts[e.event] || 0) + 1;
     if (e.session) sessions.add(e.session);
+    if (e.event === 'online_event_batch') {
+      network.packets += e.packetCount || 0;
+      network.projectilesSent += e.projectilesTx || 0;
+      network.projectilesReceived += e.projectilesRx || 0;
+      network.worldSnapshotsReceived += e.snapshotsRx || 0;
+      network.playerStatesReceived += e.stateRx || 0;
+      network.serverErrorsReceived += e.errorsRx || 0;
+    }
+    if (e.event === 'online_ws_open') network.websocketOpens++;
+    if (e.event === 'online_ws_error') network.websocketErrors++;
+    if (e.event === 'online_ws_close') network.websocketCloses++;
     if (e.event === 'fps_sample' && Number.isFinite(e.fps)) {
       fpsSum += e.fps;
       fpsSamples++;
@@ -63,6 +75,7 @@ function makeQaReport(windowHours = 72) {
       lowFpsSamples: lowFps,
       worstReportedFrameMs: worstFrameMs === null ? null : Math.round(worstFrameMs * 10) / 10
     },
+    network,
     topErrors,
     limitations: 'In-memory aggregate resets on server restart or sleep; it is not a complete historical audit. Only clients using the instrumented game build are counted.'
   };
