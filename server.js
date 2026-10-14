@@ -1,5 +1,6 @@
 'use strict';
 const http = require('node:http');
+const https = require('node:https');
 const { randomUUID } = require('node:crypto');
 const { WebSocket, WebSocketServer } = require('ws');
 
@@ -15,6 +16,42 @@ const QA_WINDOW_MS = 72 * 60 * 60 * 1000;
 const QA_BUFFER_MAX = 3000;
 const qaBootAt = Date.now();
 const qaEvents = [];
+const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL || '';
+const DISCORD_NOTIFY_COOLDOWN_MS = 60_000;
+let lastDiscordNotifyAt = 0;
+function notifyDiscordMatchmaking(mode) {
+  if (!DISCORD_WEBHOOK_URL) return;
+  const now = Date.now();
+  if (now - lastDiscordNotifyAt < DISCORD_NOTIFY_COOLDOWN_MS) return;
+  let webhook;
+  try {
+    webhook = new URL(DISCORD_WEBHOOK_URL);
+    if (webhook.protocol !== 'https:' ||
+        !['discord.com', 'discordapp.com', 'canary.discord.com', 'ptb.discord.com'].includes(webhook.hostname) ||
+        !webhook.pathname.startsWith('/api/webhooks/')) return;
+  } catch (_) { return; }
+  lastDiscordNotifyAt = now;
+  const time = new Date(now).toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' });
+  const body = JSON.stringify({
+    content: '🔎 Sinh Tồn 2D: Có người đang tìm đồng đội ' +
+      (mode === 'pvp' ? 'PvP' : 'CO-OP') + ' lúc ' + time + ' (giờ Việt Nam).',
+    allowed_mentions: { parse: [] }
+  });
+  const req = https.request(webhook, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) },
+    timeout: 5000
+  }, res => {
+    res.resume();
+    if (res.statusCode < 200 || res.statusCode >= 300) {
+      console.error('Discord webhook returned HTTP ' + res.statusCode);
+    }
+  });
+  req.on('timeout', () => req.destroy(new Error('Discord webhook timeout')));
+  req.on('error', err => console.error('Discord notification failed: ' + (err.message || 'request error')));
+  req.write(body);
+  req.end();
+}
 function qaRecord(event) {
   const stored = { at: Date.now(), ...event };
   qaEvents.push(stored);
@@ -469,6 +506,7 @@ wss.on('connection', ws => {
       const name = safeName(msg.name);
       ws.queueRef = { mode, name, queuedAt: Date.now() };
       queues[mode].push({ socket: ws, mode, name, queuedAt: ws.queueRef.queuedAt });
+      notifyDiscordMatchmaking(mode);
       send(ws, { type: 'queueWaiting', mode });
       tryPairQueue(mode);
       return;
