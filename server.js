@@ -349,11 +349,52 @@ function cleanWorldSnapshot(msg, room) {
     return { id, x: clampNumber(d.x, -100, 1100), y: clampNumber(d.y, -100, 800), t: d.t, v: clampNumber(d.v, 0, 100000) };
   }).filter(Boolean);
 
+  const seenHazards = new Set();
+  const hazards = (Array.isArray(msg.hazards) ? msg.hazards : []).slice(0, 40).map(h => {
+    if (!h || typeof h !== 'object') return null;
+    const id = cleanId(h.id);
+    const type = String(h.type || '').slice(0, 32);
+    if (!id || !/^[A-Za-z0-9_:-]+$/.test(type) || seenHazards.has(id)) return null;
+    seenHazards.add(id);
+    return {
+      id, type,
+      x: clampNumber(h.x, -100, 1100), y: clampNumber(h.y, -100, 800),
+      radius: clampNumber(h.radius, 4, 300, 18),
+      duration: clampNumber(h.duration, 0, 10000),
+      damageTick: clampNumber(h.damageTick, 0, 10000)
+    };
+  }).filter(Boolean);
+
+  const seenEffects = new Set();
+  const effects = (Array.isArray(msg.effects) ? msg.effects : []).slice(-100).map(f => {
+    if (!f || typeof f !== 'object') return null;
+    const id = cleanId(f.id);
+    const kind = f.kind === 'particle' ? 'particle' : (f.kind === 'ring' ? 'ring' : '');
+    if (!id || !kind || seenEffects.has(id)) return null;
+    seenEffects.add(id);
+    const color = typeof f.color === 'string' && /^#[0-9a-fA-F]{6}$/.test(f.color) ? f.color : '#ffffff';
+    const base = {
+      id, kind, x: clampNumber(f.x, -100, 1100), y: clampNumber(f.y, -100, 800),
+      color, radius: clampNumber(f.radius, 0, 300, 3),
+      life: clampNumber(f.life, 0, 10000, 1), maxLife: clampNumber(f.maxLife, 1, 10000, 18)
+    };
+    if (kind === 'particle') {
+      base.vx = clampNumber(f.vx, -100, 100);
+      base.vy = clampNumber(f.vy, -100, 100);
+    } else {
+      base.maxRadius = clampNumber(f.maxRadius, 1, 500, 40);
+      base.lineWidth = clampNumber(f.lineWidth, 0.5, 30, 2);
+      base.withGlow = !!f.withGlow;
+      base.simple = !!f.simple;
+    }
+    return base;
+  }).filter(Boolean);
+
   return {
     stage: Math.floor(clampNumber(msg.stage, 1, 100, 1)),
     wave: Math.floor(clampNumber(msg.wave, 1, 20, 1)),
     gameState: msg.gameState === 'GAMEOVER' ? 'GAMEOVER' : 'PLAYING',
-    won: !!msg.won, enemies, drops
+    won: !!msg.won, enemies, drops, hazards, effects
   };
 }
 function makeRoom(mode, matchmaking = false) {
