@@ -667,7 +667,7 @@ wss.on('connection', ws => {
     }
     if (msg.type === 'state') {
       const now = Date.now();
-      if (now - player.lastStateAt < 45) return;
+      if (now - player.lastStateAt < 35) return;
       player.lastStateAt = now;
       const state = msg.state || {};
       const x = Number(state.x), y = Number(state.y);
@@ -763,7 +763,7 @@ wss.on('connection', ws => {
     if (msg.type === 'worldSnapshot') {
       if (room.mode !== 'coop' || !room.started || room.hostId !== player.id) return;
       const now = Date.now();
-      if (now - (player.lastWorldAt || 0) < 90) return;
+      if (now - (player.lastWorldAt || 0) < 55) return;
       player.lastWorldAt = now;
       room.world = cleanWorldSnapshot(msg, room);
       broadcast(room, { type: 'worldSnapshot', ...room.world }, ws);
