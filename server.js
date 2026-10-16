@@ -726,6 +726,40 @@ wss.on('connection', ws => {
       }
       return;
     }
+    if (msg.type === 'visualEffects') {
+      if (room.mode !== 'coop' || !room.started || !Array.isArray(msg.effects)) return;
+      const now = Date.now();
+      if (!player.visualFxWindow || now - player.visualFxWindow >= 1000) {
+        player.visualFxWindow = now;
+        player.visualFxCount = 0;
+      }
+      const remaining = Math.max(0, 300 - (player.visualFxCount || 0));
+      if (!remaining) return;
+      const effects = [];
+      for (const fx of msg.effects.slice(0, 30)) {
+        if (!fx || typeof fx !== 'object' || effects.length >= remaining) break;
+        const kind = fx.kind === 'particles' ? 'particles' : (fx.kind === 'ring' ? 'ring' : '');
+        if (!kind) continue;
+        const color = typeof fx.color === 'string' && /^#[0-9a-fA-F]{6}$/.test(fx.color) ? fx.color : '#ffffff';
+        const base = {
+          kind, x: clampNumber(fx.x, -100, 1100), y: clampNumber(fx.y, -100, 800), color
+        };
+        if (kind === 'particles') {
+          base.count = Math.floor(clampNumber(fx.count, 1, 40, 5));
+          base.lightweight = !!fx.lightweight;
+        } else {
+          base.maxRadius = clampNumber(fx.maxRadius, 1, 500, 50);
+          base.life = clampNumber(fx.life, 1, 180, 18);
+          base.lineWidth = clampNumber(fx.lineWidth, 0.5, 20, 3);
+          base.withGlow = !!fx.withGlow;
+          base.simple = !!fx.simple;
+        }
+        effects.push(base);
+      }
+      player.visualFxCount = (player.visualFxCount || 0) + effects.length;
+      if (effects.length) broadcast(room, { type: 'visualEffects', playerId: player.id, effects }, ws);
+      return;
+    }
     if (msg.type === 'worldSnapshot') {
       if (room.mode !== 'coop' || !room.started || room.hostId !== player.id) return;
       const now = Date.now();
